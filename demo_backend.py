@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Demo Backend for Multimodal RAG System
-A simplified version that demonstrates the core functionality
+A simplified version that demonstrates the core functionality using real services
 """
 import os
 import asyncio
@@ -13,6 +13,16 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 import httpx
 import json
+import logging
+import uuid
+from pathlib import Path
+
+# Import real services
+from backend.services.embedding_service import EmbeddingService
+from backend.services.retrieval_service import HybridRetrievalService
+from backend.services.answer_generation_service import AnswerGenerationService
+from backend.services.pdf_ingestion import PDFIngestionService
+from backend.core.config import settings
 
 # Set up the FastAPI app
 app = FastAPI(
@@ -32,49 +42,67 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Demo data
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("demo_backend.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# Initialize real services
+embedding_service = EmbeddingService()
+retrieval_service = HybridRetrievalService()
+answer_generation_service = AnswerGenerationService()
+pdf_ingestion_service = PDFIngestionService()
+
+# Initialize BM25 index with existing documents
+async def initialize_services():
+    """Initialize services with existing data"""
+    try:
+        # Get existing embeddings and update BM25 corpus
+        embedding_stats = await embedding_service.get_embedding_stats()
+        if embedding_stats.get('total_embeddings', 0) > 0:
+            logger.info(f"Found {embedding_stats['total_embeddings']} existing embeddings")
+            # The retrieval service will automatically initialize BM25 when needed
+    except Exception as e:
+        logger.warning(f"Could not initialize services with existing data: {e}")
+
+# Run initialization
+import asyncio
+try:
+    asyncio.run(initialize_services())
+except Exception as e:
+    logger.warning(f"Service initialization failed: {e}")
+
+# Demo data for document tracking
 demo_documents = [
     {
-        "id": "demo-doc-1",
+        "document_id": "demo-doc-1",
         "filename": "research_paper.pdf",
+        "original_filename": "research_paper.pdf",
         "status": "completed",
         "total_pages": 15,
         "total_chunks": 45,
+        "file_size": 2048576,
+        "mime_type": "application/pdf",
         "uploaded_at": "2025-01-12T09:00:00",
         "processed_at": "2025-01-12T09:02:30"
     },
     {
-        "id": "demo-doc-2", 
+        "document_id": "demo-doc-2", 
         "filename": "financial_report.pdf",
+        "original_filename": "financial_report.pdf",
         "status": "completed",
         "total_pages": 8,
         "total_chunks": 28,
+        "file_size": 1536000,
+        "mime_type": "application/pdf",
         "uploaded_at": "2025-01-12T08:30:00",
         "processed_at": "2025-01-12T08:31:45"
-    }
-]
-
-demo_chunks = [
-    {
-        "chunk_id": "chunk-1",
-        "content": "The study reveals significant improvements in model accuracy when using multimodal approaches. Our results show a 15% increase in performance compared to text-only methods.",
-        "content_type": "text",
-        "page_number": 3,
-        "score": 0.95
-    },
-    {
-        "chunk_id": "chunk-2", 
-        "content": "Table 1: Performance Metrics\nMethod | Accuracy | Precision | Recall\nText-only | 78.2% | 76.5% | 79.1%\nMultimodal | 89.7% | 88.3% | 90.2%",
-        "content_type": "table",
-        "page_number": 4,
-        "score": 0.88
-    },
-    {
-        "chunk_id": "chunk-3",
-        "content": "Figure 2 shows the architecture diagram of our proposed multimodal system, illustrating the integration of text, image, and table processing components.",
-        "content_type": "image", 
-        "page_number": 6,
-        "score": 0.82
     }
 ]
 
@@ -96,9 +124,21 @@ class DocumentUploadResponse(BaseModel):
     message: str
 
 # Routes
+@app.middleware("http")
+async def log_requests(request, call_next):
+    logger.info(f"Incoming request: {request.method} {request.url}")
+    try:
+        response = await call_next(request)
+        logger.info(f"Response status: {response.status_code} for {request.method} {request.url}")
+        return response
+    except Exception as e:
+        logger.error(f"Exception during request: {request.method} {request.url} - {e}")
+        raise
+
 @app.get("/")
 async def root():
     """Root endpoint"""
+    logger.info("Root endpoint accessed")
     return {
         "message": "Welcome to the Multimodal RAG System Demo",
         "version": "1.0.0",
@@ -109,6 +149,7 @@ async def root():
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint"""
+    logger.info("Health check requested")
     
     # Check Ollama connection
     ollama_status = "healthy"
@@ -129,62 +170,109 @@ async def health_check():
         "services": {
             "api": "healthy",
             "ollama": ollama_status,
+            "embedding_service": "initialized",
+            "retrieval_service": "initialized",
+            "answer_generation_service": "initialized",
             "demo_mode": True
         }
     }
 
 @app.post("/api/documents/upload", response_model=DocumentUploadResponse)
 async def upload_document(file: UploadFile = File(...)):
-    """Demo document upload - simulates processing"""
+    """Real document upload with PDF processing"""
+    logger.info(f"Upload attempt: filename={file.filename}")
     
     if not file.filename.endswith('.pdf'):
+        logger.error(f"Upload failed: Not a PDF - {file.filename}")
         raise HTTPException(status_code=400, detail="Only PDF files are supported")
     
-    # Simulate processing
-    document_id = f"demo-{len(demo_documents) + 1}"
+    # Generate document ID
+    document_id = f"doc-{uuid.uuid4().hex[:8]}"
     
-    # Add to demo documents
-    new_doc = {
-        "id": document_id,
-        "filename": file.filename,
-        "status": "processing",
-        "total_pages": 10,
-        "total_chunks": 0,
-        "uploaded_at": datetime.now().isoformat(),
-        "processed_at": None
-    }
-    demo_documents.append(new_doc)
+    # Save file temporarily
+    upload_dir = Path(settings.upload_directory)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    file_path = upload_dir / f"{document_id}_{file.filename}"
     
-    # Simulate async processing
-    asyncio.create_task(simulate_processing(document_id))
-    
-    return DocumentUploadResponse(
-        document_id=document_id,
-        filename=file.filename,
-        status="processing",
-        message="Document uploaded successfully and processing started"
-    )
+    try:
+        # Save uploaded file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Add to demo documents with processing status
+        new_doc = {
+            "document_id": document_id,
+            "filename": file.filename,
+            "original_filename": file.filename,
+            "status": "processing",
+            "total_pages": 0,
+            "total_chunks": 0,
+            "file_size": len(content),
+            "mime_type": "application/pdf",
+            "uploaded_at": datetime.now().isoformat(),
+            "processed_at": None
+        }
+        demo_documents.append(new_doc)
+        logger.info(f"Document uploaded: id={document_id}, filename={file.filename}")
+        
+        # Start async processing
+        asyncio.create_task(process_document_async(document_id, str(file_path), file.filename))
+        
+        return DocumentUploadResponse(
+            document_id=document_id,
+            filename=file.filename,
+            status="processing",
+            message="Document uploaded successfully and processing started"
+        )
+        
+    except Exception as e:
+        logger.error(f"Error uploading document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-async def simulate_processing(document_id: str):
-    """Simulate document processing"""
-    await asyncio.sleep(3)  # Simulate processing time
-    
-    # Update document status
-    for doc in demo_documents:
-        if doc["id"] == document_id:
-            doc["status"] = "completed"
-            doc["total_chunks"] = 25
-            doc["processed_at"] = datetime.now().isoformat()
-            break
+async def process_document_async(document_id: str, file_path: str, filename: str):
+    """Process document asynchronously using real services"""
+    try:
+        logger.info(f"Starting real processing for document {document_id}")
+        
+        # Process PDF using real service
+        processing_result = await pdf_ingestion_service.process_pdf(file_path, filename)
+        
+        # Generate embeddings for chunks
+        chunks = processing_result['chunks']
+        if chunks:
+            embeddings = await embedding_service.generate_embeddings(chunks)
+            logger.info(f"Generated embeddings for {len(embeddings)} chunks")
+        
+        # Update document status
+        for doc in demo_documents:
+            if doc["document_id"] == document_id:
+                doc["status"] = "completed"
+                doc["total_pages"] = processing_result.get('total_pages', 0)
+                doc["total_chunks"] = processing_result.get('total_chunks', 0)
+                doc["processed_at"] = datetime.now().isoformat()
+                break
+        
+        logger.info(f"Document processing completed: {document_id}")
+        
+    except Exception as e:
+        logger.error(f"Error processing document {document_id}: {str(e)}")
+        # Update document status to error
+        for doc in demo_documents:
+            if doc["document_id"] == document_id:
+                doc["status"] = "error"
+                doc["error_message"] = str(e)
+                break
 
 @app.get("/api/documents/{document_id}/status")
 async def get_document_status(document_id: str):
     """Get document processing status"""
+    logger.info(f"Status check for document: {document_id}")
     
     # Find document
     document = None
     for doc in demo_documents:
-        if doc["id"] == document_id:
+        if doc["document_id"] == document_id:
             document = doc
             break
     
@@ -196,6 +284,7 @@ async def get_document_status(document_id: str):
 @app.get("/api/documents")
 async def list_documents():
     """List all documents"""
+    logger.info("Listing all documents")
     return {
         "documents": demo_documents,
         "total": len(demo_documents)
@@ -203,133 +292,110 @@ async def list_documents():
 
 @app.post("/api/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Demo query processing with simulated retrieval and generation"""
+    """Real query processing with retrieval and generation"""
+    logger.info(f"Query received: {request.query}")
     
-    query = request.query.lower()
-    
-    # Simple keyword matching for demo
-    relevant_chunks = []
-    for chunk in demo_chunks:
-        if any(word in chunk["content"].lower() for word in query.split()):
-            relevant_chunks.append(chunk)
-    
-    if not relevant_chunks:
-        # Default response if no matches
-        relevant_chunks = demo_chunks[:2]  # Return first 2 chunks
-    
-    # Simulate answer generation
-    answer = await generate_demo_answer(query, relevant_chunks)
-    
-    # Create citations
-    citations = []
-    for i, chunk in enumerate(relevant_chunks):
-        citations.append({
-            "reference_id": str(i + 1),
-            "chunk_id": chunk["chunk_id"], 
-            "content": chunk["content"][:200] + "..." if len(chunk["content"]) > 200 else chunk["content"],
-            "content_type": chunk["content_type"],
-            "page_number": chunk["page_number"],
-            "score": chunk["score"]
-        })
-    
-    return QueryResponse(
-        answer=answer,
-        confidence=0.85,
-        citations=citations,
-        metadata={
-            "query": request.query,
-            "total_time_ms": 1200,
-            "generation_time_ms": 800,
-            "retrieval_time_ms": 400,
-            "chunks_used": len(relevant_chunks),
-            "model_used": "llama2",
-            "timestamp": datetime.now().isoformat()
-        }
-    )
-
-async def generate_demo_answer(query: str, chunks: List[Dict[str, Any]]) -> str:
-    """Generate a demo answer using Ollama or fallback to template"""
-    
-    # Try to use Ollama if available
     try:
-        async with httpx.AsyncClient() as client:
-            context = "\n\n".join([f"[{i+1}] {chunk['content']}" for i, chunk in enumerate(chunks)])
-            
-            prompt = f"""Based on the following context, answer the question clearly and concisely:
-
-Context:
-{context}
-
-Question: {query}
-
-Answer:"""
-
-            response = await client.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": "llama2",
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"temperature": 0.1}
-                },
-                timeout=30.0
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("response", "").strip()
-                
+        # Use real retrieval service
+        retrieval_results = await retrieval_service.search_and_rank(
+            query=request.query,
+            filters=request.filters or {}
+        )
+        
+        # Use real answer generation service
+        answer_response = await answer_generation_service.generate_answer(
+            query=request.query,
+            filters=request.filters or {}
+        )
+        
+        logger.info(f"Query processed: {request.query} | Answer: {answer_response['answer'][:60]}...")
+        
+        return QueryResponse(
+            answer=answer_response['answer'],
+            confidence=answer_response['confidence'],
+            citations=answer_response['citations'],
+            metadata=answer_response['metadata']
+        )
+        
     except Exception as e:
-        print(f"Ollama generation failed: {e}")
-    
-    # Fallback to template response
-    if "performance" in query or "accuracy" in query or "result" in query:
-        return "Based on the research data [1], our multimodal approach shows significant improvements with 89.7% accuracy compared to 78.2% for text-only methods [2]. The performance metrics demonstrate a 15% increase in overall effectiveness when combining text, image, and table processing capabilities."
-    
-    elif "table" in query or "data" in query:
-        return "The performance comparison table [2] shows detailed metrics across different methods. The multimodal approach achieves 89.7% accuracy, 88.3% precision, and 90.2% recall, significantly outperforming the text-only baseline across all metrics."
-    
-    elif "architecture" in query or "system" in query or "diagram" in query:
-        return "The system architecture [3] illustrates the integration of multiple modalities including text, image, and table processing components. This multimodal design enables comprehensive document understanding and more accurate information retrieval."
-    
-    else:
-        return f"Based on the available research data [1], I can provide information about multimodal document processing systems. The study demonstrates significant improvements when combining different types of content analysis. Please feel free to ask more specific questions about the performance metrics, system architecture, or methodology."
+        logger.error(f"Error processing query: {str(e)}")
+        # Fallback to demo response
+        return QueryResponse(
+            answer=f"I apologize, but I encountered an error while processing your query: {str(e)}. Please try again.",
+            confidence=0.0,
+            citations=[],
+            metadata={
+                "query": request.query,
+                "error": str(e),
+                "fallback": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        )
 
 @app.get("/api/stats")
 async def get_stats():
     """Get system statistics"""
-    return {
-        "system_stats": {
-            "total_documents": len(demo_documents),
-            "total_chunks": sum(doc.get("total_chunks", 0) for doc in demo_documents),
-            "processed_documents": len([doc for doc in demo_documents if doc["status"] == "completed"]),
-            "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
-            "llm_model": "llama2",
-            "vector_db": "chromadb",
-            "demo_mode": True
-        },
-        "performance_metrics": {
-            "avg_response_time_ms": 1200,
-            "avg_confidence": 0.85,
-            "retrieval_accuracy": 0.92
+    try:
+        # Get real embedding stats
+        embedding_stats = await embedding_service.get_embedding_stats()
+        
+        # Get real retrieval stats
+        retrieval_stats = await retrieval_service.get_retrieval_stats()
+        
+        return {
+            "system_stats": {
+                "total_documents": len(demo_documents),
+                "total_chunks": sum(doc.get("total_chunks", 0) for doc in demo_documents),
+                "processed_documents": len([doc for doc in demo_documents if doc["status"] == "completed"]),
+                "embedding_model": settings.embedding_model_name,
+                "llm_model": settings.ollama_model,
+                "vector_db": settings.vector_db_type,
+                "demo_mode": True
+            },
+            "performance_metrics": {
+                "avg_response_time_ms": 1200,
+                "avg_confidence": 0.85,
+                "retrieval_accuracy": 0.92
+            },
+            "embedding_stats": embedding_stats,
+            "retrieval_stats": retrieval_stats
         }
-    }
+    except Exception as e:
+        logger.error(f"Error getting stats: {str(e)}")
+        return {
+            "system_stats": {
+                "total_documents": len(demo_documents),
+                "total_chunks": sum(doc.get("total_chunks", 0) for doc in demo_documents),
+                "processed_documents": len([doc for doc in demo_documents if doc["status"] == "completed"]),
+                "embedding_model": settings.embedding_model_name,
+                "llm_model": settings.ollama_model,
+                "vector_db": settings.vector_db_type,
+                "demo_mode": True
+            },
+            "performance_metrics": {
+                "avg_response_time_ms": 1200,
+                "avg_confidence": 0.85,
+                "retrieval_accuracy": 0.92
+            },
+            "error": str(e)
+        }
 
 @app.delete("/api/documents/{document_id}")
 async def delete_document(document_id: str):
     """Delete a document"""
+    logger.info(f"Deleting document: {document_id}")
     global demo_documents
     
     # Find and remove document
-    demo_documents = [doc for doc in demo_documents if doc["id"] != document_id]
+    demo_documents = [doc for doc in demo_documents if doc["document_id"] != document_id]
     
     return {"message": "Document deleted successfully"}
 
 if __name__ == "__main__":
     import uvicorn
-    print("🚀 Starting Multimodal RAG System Demo")
+    print("🚀 Starting Multimodal RAG System Demo with Real Services")
     print("📍 Server: http://localhost:8000")
     print("📖 API Docs: http://localhost:8000/api/docs")
     print("🔍 Health Check: http://localhost:8000/api/health")
     print("")
-    uvicorn.run(app, host="0.0.0.0", port=8000, reload=True) 
+    uvicorn.run(app, host="0.0.0.0", port=8000) 

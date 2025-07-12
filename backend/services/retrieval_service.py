@@ -52,8 +52,10 @@ class HybridRetrievalService:
             # Step 1: Semantic search using embeddings
             semantic_results = await self._semantic_search(query, filters)
             
-            # Step 2: Lexical search using BM25
-            lexical_results = await self._lexical_search(query, filters)
+            # Step 2: Lexical search using BM25 (skip if no documents available)
+            lexical_results = []
+            if self.bm25_index is not None:
+                lexical_results = await self._lexical_search(query, filters)
             
             # Step 3: Hybrid scoring and ranking
             hybrid_results = await self._hybrid_ranking(
@@ -117,6 +119,11 @@ class HybridRetrievalService:
             if self.bm25_index is None:
                 await self._initialize_bm25_index()
             
+            # Check if BM25 index is available
+            if self.bm25_index is None:
+                logger.warning("BM25 index not available, skipping lexical search")
+                return []
+            
             # Tokenize query
             query_tokens = self._tokenize_text(query)
             
@@ -171,6 +178,7 @@ class HybridRetrievalService:
                 logger.info(f"Initialized BM25 index with {len(tokenized_corpus)} documents")
             else:
                 logger.warning("No documents available for BM25 indexing")
+                self.bm25_index = None
                 
         except Exception as e:
             logger.error(f"Error initializing BM25 index: {str(e)}")
@@ -456,4 +464,4 @@ class HybridRetrievalService:
 
 
 # Global retrieval service instance
-retrieval_service = HybridRetrievalService() 
+retrieval_service = HybridRetrievalService()

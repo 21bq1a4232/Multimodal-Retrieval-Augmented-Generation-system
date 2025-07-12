@@ -2,8 +2,9 @@
 Configuration management for the Multimodal RAG System
 """
 import os
-from typing import List, Optional
-from pydantic import BaseSettings, Field, validator
+from typing import List, Optional, Union, Any
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, validator
 from pathlib import Path
 
 
@@ -38,12 +39,12 @@ class Settings(BaseSettings):
     
     # Ollama Settings
     ollama_base_url: str = Field(default="http://localhost:11434", env="OLLAMA_BASE_URL")
-    ollama_model: str = Field(default="llama2", env="OLLAMA_MODEL")
+    ollama_model: str = Field(default="phi:latest", env="OLLAMA_MODEL")
     ollama_timeout: int = Field(default=120, env="OLLAMA_TIMEOUT")
     
     # File Upload Settings
     max_file_size: int = Field(default=50 * 1024 * 1024, env="MAX_FILE_SIZE")  # 50MB
-    allowed_extensions: List[str] = Field(default=[".pdf"], env="ALLOWED_EXTENSIONS")
+    allowed_extensions: Union[str, List[str]] = Field(default=["*"], env="ALLOWED_EXTENSIONS")  # Allow all extensions
     upload_directory: str = Field(default="./data/uploads", env="UPLOAD_DIRECTORY")
     
     # Processing Settings
@@ -54,7 +55,7 @@ class Settings(BaseSettings):
     # Retrieval Settings
     retrieval_k: int = Field(default=10, env="RETRIEVAL_K")
     rerank_k: int = Field(default=5, env="RERANK_K")
-    similarity_threshold: float = Field(default=0.7, env="SIMILARITY_THRESHOLD")
+    similarity_threshold: float = Field(default=0.1, env="SIMILARITY_THRESHOLD")
     
     # Scoring Weights
     semantic_weight: float = Field(default=0.6, env="SEMANTIC_WEIGHT")
@@ -87,15 +88,47 @@ class Settings(BaseSettings):
         return v
     
     @validator("allowed_extensions", pre=True)
-    def parse_extensions(cls, v):
-        """Parse comma-separated extensions"""
+    def parse_allowed_extensions(cls, v):
+        """Parse allowed extensions from environment variable"""
+        # Handle None or empty values
+        if v is None:
+            return ["*"]
+            
+        # Return wildcard to allow all extensions
+        if v == "*" or v == ["*"]:
+            return ["*"]
+            
+        if isinstance(v, list):
+            return v
+            
         if isinstance(v, str):
-            return [ext.strip() for ext in v.split(",")]
-        return v
+            # Handle empty string or quoted empty strings
+            if not v.strip() or v.strip() in ['""', "''"]:
+                return ["*"]  # Default to all extensions if empty
+                
+            # First try to parse as JSON (for cases like ["pdf", "docx"])
+            try:
+                import json
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed if parsed else ["*"]
+                elif isinstance(parsed, str):
+                    return [parsed] if parsed else ["*"]
+            except (json.JSONDecodeError, ValueError):
+                pass  # Not JSON, continue with other parsing methods
+            
+            # Handle comma-separated format like "pdf,docx,txt"
+            if "," in v:
+                extensions = [ext.strip() for ext in v.split(",") if ext.strip()]
+                return extensions if extensions else ["*"]
+            
+            # Handle single extension like ".pdf" or "pdf"
+            if v.strip():
+                return [v.strip()]
+                
+        return ["*"]  # Default fallback
     
-    class Config:
-        env_file = ".env"
-        case_sensitive = False
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
 
 # Global settings instance
@@ -144,4 +177,4 @@ SECURITY_CONFIG = {
     "secret_key": settings.secret_key,
     "algorithm": settings.algorithm,
     "access_token_expire_minutes": settings.access_token_expire_minutes,
-} 
+}

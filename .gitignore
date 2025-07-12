@@ -1,0 +1,77 @@
+# Environments
+.env
+.venv
+venv/
+env/
+/venv
+/env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Node
+node_modules/
+/frontend/node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+package-lock.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Build artifacts
+/build
+/dist
+/out
+
+# Next.js
+.next/
+/frontend/.next
+out/
+
+# Other
+*.log
+*.lock
+.c9/
+*~
+*.orig
+pip-log.txt
+pip-delete-this-directory.txt
+celerybeat-schedule
+coverage.xml
+nosetests.xml
+pip-selfcheck.json
+test-result.xml
+
+# Jupyter Notebook
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+ipython_notebook_config.py
+nbgrader_cache/
+.nb-auto-saved
+.nbgrader.log
+.nbgrader_cache/
+nbgrader_step.db
+nbgrader_step.db-journal
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SQLite
+*.sqlite3
+
+# Docker
+docker-compose.override.yml 

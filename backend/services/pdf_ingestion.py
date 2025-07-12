@@ -11,10 +11,22 @@ from datetime import datetime
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
+logger = logging.getLogger(__name__)
+
 # PDF processing imports
 import PyPDF2
 import pdfplumber
-import fitz  # PyMuPDF
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    try:
+        import pymupdf as fitz
+        PYMUPDF_AVAILABLE = True
+    except ImportError:
+        PYMUPDF_AVAILABLE = False
+        logger.warning("PyMuPDF not available for image extraction")
+
 from PIL import Image
 import pandas as pd
 
@@ -24,20 +36,23 @@ import easyocr
 import cv2
 import numpy as np
 
+from backend.core.config import settings
+from backend.models.document import Document, DocumentChunk
+
 # Table extraction imports
 import tabula
-import camelot
+# Make camelot import optional due to version compatibility issues
+try:
+    import camelot
+    CAMELOT_AVAILABLE = True
+except ImportError:
+    CAMELOT_AVAILABLE = False
+    logger.warning("Camelot not available for table extraction. Using tabula and pdfplumber only.")
 
 # Text processing
 import re
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer
-
-from backend.core.config import settings
-from backend.models.document import Document, DocumentChunk
-
-
-logger = logging.getLogger(__name__)
 
 
 class PDFIngestionService:
@@ -194,63 +209,70 @@ class PDFIngestionService:
         """Extract and structure table content"""
         table_chunks = []
         
+        # First try pdfplumber for table extraction (more reliable)
         try:
-            # Use tabula-py for table extraction
-            tables = tabula.read_pdf(file_path, pages='all', multiple_tables=True)
-            
-            for table_idx, table in enumerate(tables):
-                if table.empty:
-                    continue
-                
-                # Convert table to structured format
-                table_dict = table.to_dict('records')
-                table_json = json.dumps(table_dict, ensure_ascii=False)
-                
-                # Create readable text representation
-                table_text = self._table_to_text(table)
-                
-                chunk = {
-                    'content': table_text,
-                    'content_type': 'table',
-                    'page_number': 1,  # tabula doesn't provide page info easily
-                    'sequence_number': table_idx,
-                    'table_metadata': {
-                        'headers': table.columns.tolist(),
-                        'rows': len(table),
-                        'columns': len(table.columns),
-                        'structured_data': table_dict
-                    },
-                    'word_count': len(table_text.split()),
-                    'char_count': len(table_text)
-                }
-                
-                table_chunks.append(chunk)
-                
+            with pdfplumber.open(file_path) as pdf:
+                for page_num, page in enumerate(pdf.pages, 1):
+                    tables = page.extract_tables()
+                    
+                    for table_idx, table in enumerate(tables):
+                        if not table or len(table) < 2:  # Skip empty or single-row tables
+                            continue
+                        
+                        # Convert table to DataFrame
+                        table_df = pd.DataFrame(table[1:], columns=table[0])
+                        
+                        # Create readable text representation
+                        table_text = self._table_to_text(table_df)
+                        
+                        chunk = {
+                            'content': table_text,
+                            'content_type': 'table',
+                            'page_number': page_num,
+                            'sequence_number': table_idx,
+                            'table_metadata': {
+                                'headers': table_df.columns.tolist(),
+                                'rows': len(table_df),
+                                'columns': len(table_df.columns),
+                                'structured_data': table_df.to_dict('records'),
+                                'extraction_method': 'pdfplumber'
+                            },
+                            'word_count': len(table_text.split()),
+                            'char_count': len(table_text)
+                        }
+                        
+                        table_chunks.append(chunk)
+                        
         except Exception as e:
-            logger.error(f"Error extracting table content: {str(e)}")
-            
-            # Fallback to camelot for table extraction
+            logger.error(f"Error extracting tables with pdfplumber: {str(e)}")
+        
+        # Fallback to tabula-py if pdfplumber didn't find tables
+        if not table_chunks:
             try:
-                tables = camelot.read_pdf(file_path, pages='all')
+                # Use tabula-py for table extraction
+                tables = tabula.read_pdf(file_path, pages='all', multiple_tables=True)
                 
                 for table_idx, table in enumerate(tables):
-                    table_df = table.df
-                    if table_df.empty:
+                    if table.empty:
                         continue
                     
-                    table_text = self._table_to_text(table_df)
+                    # Convert table to structured format
+                    table_dict = table.to_dict('records')
+                    
+                    # Create readable text representation
+                    table_text = self._table_to_text(table)
                     
                     chunk = {
                         'content': table_text,
                         'content_type': 'table',
-                        'page_number': table.page,
+                        'page_number': 1,  # tabula doesn't provide page info easily
                         'sequence_number': table_idx,
                         'table_metadata': {
-                            'headers': table_df.columns.tolist(),
-                            'rows': len(table_df),
-                            'columns': len(table_df.columns),
-                            'structured_data': table_df.to_dict('records'),
-                            'accuracy': table.accuracy
+                            'headers': table.columns.tolist(),
+                            'rows': len(table),
+                            'columns': len(table.columns),
+                            'structured_data': table_dict,
+                            'extraction_method': 'tabula'
                         },
                         'word_count': len(table_text.split()),
                         'char_count': len(table_text)
@@ -258,14 +280,52 @@ class PDFIngestionService:
                     
                     table_chunks.append(chunk)
                     
-            except Exception as e2:
-                logger.error(f"Error with camelot table extraction: {str(e2)}")
+            except Exception as e:
+                logger.error(f"Error extracting table content with tabula: {str(e)}")
+                
+                # Final fallback to camelot for table extraction if available
+                if CAMELOT_AVAILABLE:
+                    try:
+                        tables = camelot.read_pdf(file_path, pages='all')
+                        
+                        for table_idx, table in enumerate(tables):
+                            table_df = table.df
+                            if table_df.empty:
+                                continue
+                            
+                            table_text = self._table_to_text(table_df)
+                            
+                            chunk = {
+                                'content': table_text,
+                                'content_type': 'table',
+                                'page_number': table.page,
+                                'sequence_number': table_idx,
+                                'table_metadata': {
+                                    'headers': table_df.columns.tolist(),
+                                    'rows': len(table_df),
+                                    'columns': len(table_df.columns),
+                                    'structured_data': table_df.to_dict('records'),
+                                    'accuracy': table.accuracy,
+                                    'extraction_method': 'camelot'
+                                },
+                                'word_count': len(table_text.split()),
+                                'char_count': len(table_text)
+                            }
+                            
+                            table_chunks.append(chunk)
+                            
+                    except Exception as e2:
+                        logger.error(f"Error with camelot table extraction: {str(e2)}")
         
         return table_chunks
     
     def _extract_image_content(self, file_path: str) -> List[Dict[str, Any]]:
         """Extract and process images with OCR"""
         image_chunks = []
+        
+        if not PYMUPDF_AVAILABLE:
+            logger.warning("PyMuPDF not available, skipping image extraction")
+            return image_chunks
         
         try:
             pdf_document = fitz.open(file_path)
@@ -455,4 +515,4 @@ class PDFIngestionService:
 
 
 # Import for image processing
-import io 
+import io

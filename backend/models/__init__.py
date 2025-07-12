@@ -1,0 +1,1 @@
+# Database models for the Multimodal RAG System 

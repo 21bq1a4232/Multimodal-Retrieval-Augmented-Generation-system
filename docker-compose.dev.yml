@@ -1,0 +1,23 @@
+services:
+  # PostgreSQL Database (only if not running locally)
+  postgres:
+    image: postgres:15
+    container_name: multimodal-rag-db
+    environment:
+      POSTGRES_DB: multimodal_rag
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"  # Use different port to avoid conflicts
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  rag-network:
+    driver: bridge 

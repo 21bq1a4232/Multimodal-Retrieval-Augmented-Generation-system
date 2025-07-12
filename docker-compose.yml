@@ -1,0 +1,59 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    container_name: multimodal-rag-db
+    environment:
+      POSTGRES_DB: multimodal_rag
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # Redis for background tasks
+  redis:
+    image: redis:7-alpine
+    container_name: multimodal-rag-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+  # Backend API
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: multimodal-rag-backend
+    environment:
+      - DATABASE_URL=postgresql://postgres:password@postgres:5432/multimodal_rag
+      - REDIS_URL=redis://redis:6379
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - VECTOR_DB_PATH=/app/data/vector_db
+      - UPLOAD_DIRECTORY=/app/data/uploads
+      - DEBUG=false
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - rag-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+
+networks:
+  rag-network:
+    driver: bridge 
